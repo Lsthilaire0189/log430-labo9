@@ -1,0 +1,79 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  concurrency-test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: yugabyte
+            workdir: yugabyte-db
+            db_host: yugabyte1
+            db_port: 5433
+            db_name: yugabyte
+            db_user: yugabyte
+            db_password: ""
+          - name: cockroach
+            workdir: cockroach-db
+            db_host: cockroach1
+            db_port: 26257
+            db_name: labo09
+            db_user: root
+            db_password: ""
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Create .env file
+        working-directory: ${{ matrix.workdir }}
+        run: |
+          cat > .env <<EOF
+          DB_HOST=${{ matrix.db_host }}
+          DB_PORT=${{ matrix.db_port }}
+          DB_NAME=${{ matrix.db_name }}
+          DB_USER=${{ matrix.db_user }}
+          DB_PASSWORD=${{ matrix.db_password }}
+          EOF
+
+      - name: Install Python dependencies
+        working-directory: ${{ matrix.workdir }}
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Start stack
+        working-directory: ${{ matrix.workdir }}
+        run: docker compose up -d --build
+
+      - name: Wait for API health check
+        run: |
+          for i in {1..60}; do
+            if curl -fsS http://localhost:5000/health >/dev/null; then
+              exit 0
+            fi
+            sleep 5
+          done
+          docker compose -f ${{ matrix.workdir }}/docker-compose.yml logs --no-color
+          exit 1
+
+      - name: Run concurrency test
+        working-directory: ${{ matrix.workdir }}
+        env:
+          PYTHONPATH: ${{ github.workspace }}/${{ matrix.workdir }}/src
+        run: python src/tests/concurrency_test.py --threads 5 --product 3
+
+      - name: Stop stack
+        if: always()
+        working-directory: ${{ matrix.workdir }}
+        run: docker compose down -v
